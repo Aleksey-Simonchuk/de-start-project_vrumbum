@@ -9,7 +9,7 @@ CREATE SCHEMA IF NOT EXISTS raw_data;
 CREATE TABLE IF NOT EXISTS raw_data.sales (
 	id INTEGER,
 	auto TEXT,
-	gasoline_consumption VARCHAR,
+	gasoline_consumption NUMERIC(3, 1),
 	price NUMERIC,
 	date DATE,
 	person_name TEXT,
@@ -18,24 +18,23 @@ CREATE TABLE IF NOT EXISTS raw_data.sales (
 	brand_origin TEXT
 );
 
-/* заполняем таблицу значениями через терминал  спомощью psql*/
+/* заполняем таблицу значениями через терминал  с помощью psql*/
 
 /* \copy raw_data.sales(id, auto, gasoline_consumption, price, date, person_name, phone, discount, brand_origin)
-FROM '/home/sas/Dev/cars.csv' CSV HEADER;*/
+FROM '/home/sas/Dev/cars.csv' CSV HEADER NULL 'null';*/
 
-/* избавляемся от текстовых данных в атрибуте расхода топлива и заменяем на NULL*/
-
-UPDATE raw_data.sales
-SET gasoline_consumption = NULL
-WHERE gasoline_consumption = 'null';
-
-/* обнаружили 'null' в атрибуте 'brand_origin', проверка показала, что все авто - porsche,
- * а все знают, что это немецкий бренд, обогатим данные в новой схеме бд,-
- * пусть сырые будут в оригинале для истории*/
+/* обнаружили пропуски в атрибуте 'brand_origin', проверка показала, что все авто - porsche,
+ * а все знают, что это немецкий бренд, обогатим данные*/
 
 SELECT auto
 FROM raw_data.sales
-WHERE brand_origin = 'null';
+WHERE brand_origin IS NULL;
+
+/* исправляем brand_origin у porsche*/
+
+UPDATE raw_data.sales
+SET brand_origin = 'Germany'
+WHERE brand_origin IS NULL;
 
 /* создаём схему в основной базе данных*/
 
@@ -54,49 +53,48 @@ INSERT INTO car_shop.colors (name)
 SELECT DISTINCT split_part(auto, ', ', 2) AS color
 FROM raw_data.sales;
 
-/* создаём таблицу автомобилей*/
+/* создаём таблицу стран*/
 
-CREATE TABLE IF NOT EXISTS car_shop.cars (
-	id SERIAL PRIMARY KEY, /* по ТЗ*/ 
-	brand VARCHAR(20) NOT NULL, /* в названии бренда могут быть и цифры, и буквы, поэтому выбираем varchar*/
-	model VARCHAR(20) NOT NULL UNIQUE, /*есть текст и цифры в названии, основной атрибут, определяющий уникальность*/
-	gasoline_consumption NUMERIC(3,1), /* грузовые авто не продаём и заявленной точности и количества цифр достаточно*/
-	brand_origin VARCHAR(20) NOT NULL /* страна происхождения бренда это текст*/
+CREATE TABLE IF NOT EXISTS car_shop.brand_origin (
+	id SERIAL PRIMARY KEY,
+	name VARCHAR(20) NOT NULL UNIQUE /* страна происхождения бренда это текст*/
 );
 
 /* заполняем данными*/
 
-INSERT INTO car_shop.cars (model, brand, gasoline_consumption, brand_origin)
-SELECT
-	DISTINCT ltrim(REPLACE(split_part(auto, ', ', 1), split_part(auto, ' ', 1), ''))  AS model,
-	split_part(auto, ' ', 1) AS brand,
-	gasoline_consumption::NUMERIC(3, 1),
-	brand_origin
+INSERT INTO car_shop.brand_origin (name)
+SELECT DISTINCT brand_origin
+FROM raw_data.sales
+WHERE brand_origin IS NOT NULL;
+
+/* создаём таблицу брендов*/
+
+CREATE TABLE IF NOT EXISTS car_shop.brands (
+	id SERIAL PRIMARY KEY,
+	name VARCHAR(20) NOT NULL UNIQUE /* в названии бренда могут быть и цифры, и буквы, поэтому выбираем varchar*/
+);
+
+/* заполняем данными*/
+
+INSERT INTO car_shop.brands (name)
+SELECT DISTINCT split_part(auto, ' ', 1)
 FROM raw_data.sales;
 
-/* исправляем brand_origin у porsche*/
+/* создаём таблицу автомобилей*/
 
-UPDATE car_shop.cars
-SET brand_origin = 'Germany'
-WHERE brand_origin = 'null';
-
-/* создаём таблицу возможных расцветок автомобилей*/
-
-CREATE TABLE IF NOT EXISTS car_shop.cars_colors (
-	id SERIAL PRIMARY KEY, /* по ТЗ. атрибут определяющий полную уникальность авто*/
-	car_id INTEGER REFERENCES car_shop.cars, /* модель*/
-	color_id INTEGER REFERENCES car_shop.colors /* цвет*/
+CREATE TABLE IF NOT EXISTS car_shop.models (
+	id SERIAL PRIMARY KEY, /* по ТЗ*/ 
+	name VARCHAR(20) NOT NULL UNIQUE, /*есть текст и цифры в названии, основной атрибут, определяющий уникальность*/
+	gasoline_consumption NUMERIC(3,1) /* грузовые авто не продаём и заявленной точности и количества цифр достаточно*/
 );
 
 /* заполняем данными*/
 
-INSERT INTO car_shop.cars_colors (car_id, color_id)
+INSERT INTO car_shop.models (name, gasoline_consumption)
 SELECT
-	car_id,
-	color_id
-FROM
-	generate_series(1, 19) AS car_id,
-	generate_series(1, 8) AS color_id;
+	DISTINCT ltrim(REPLACE(split_part(auto, ', ', 1), split_part(auto, ' ', 1), '')),
+	gasoline_consumption::NUMERIC(3, 1)
+FROM raw_data.sales;
 
 /*создаём таблицу клиентов*/
 
@@ -120,8 +118,8 @@ FROM raw_data.sales;
 
 CREATE TABLE IF NOT EXISTS car_shop.invoices (
 	id SERIAL PRIMARY KEY, /* по ТЗ*/
-	cars_colors_id INTEGER REFERENCES car_shop.cars_colors, /* уникальный id комплектации авто*/
-	car_id INTEGER REFERENCES car_shop.cars, /* связь с моделями напрямую*/
+	brand_id INTEGER REFERENCES car_shop.brands, /* id бренда*/
+	model_id INTEGER REFERENCES car_shop.models, /* связь с моделями напрямую*/
 	color_id INTEGER REFERENCES car_shop.colors,/* связь с цветом напрямую*/
 	price NUMERIC(9,2) NOT NULL CHECK (price > 0), /*цена может содержать только сотые
 	и не может быть больше семизначной суммы.
@@ -130,54 +128,69 @@ CREATE TABLE IF NOT EXISTS car_shop.invoices (
 	дробные числа не потеряются*/
 	discount INTEGER DEFAULT 0 CHECK (discount >= 0), /* целое число, но при желании можно перевести в доли и сделать numeric*/
 	billing_date DATE NOT NULL DEFAULT CURRENT_DATE, /* дата продажи, по умолчанию ставим текущую дату заполнения*/
-	customer_id INTEGER REFERENCES car_shop.clients /* связь со справочником клиентов напрямую*/
+	customer_id INTEGER REFERENCES car_shop.clients, /* связь со справочником клиентов напрямую*/
+	country_id INTEGER REFERENCES car_shop.brand_origin /* связь со справочником стран*/
 );
 
 /* заполняем данными*/
 
 INSERT INTO car_shop.invoices (
-	cars_colors_id,
-	car_id,
+	brand_id,
+	model_id,
 	color_id,
 	price,
 	discount,
 	billing_date,
-	customer_id
+	customer_id,
+	country_id
 )
 SELECT
-	cc.*,
+	b.id,
+	m.id,
+	c.id,
 	raw.price,
 	raw.discount,
 	raw.date,
-	cli.id
+	cl.id,
+	bo.id
 FROM raw_data.sales raw
-LEFT JOIN car_shop.colors cl 
-ON split_part(raw.auto, ', ', 2) = cl.name
-LEFT JOIN car_shop.cars cr
-ON ltrim(REPLACE(split_part(raw.auto, ', ', 1), split_part(raw.auto, ' ', 1), '')) = cr.model
-LEFT JOIN car_shop.cars_colors cc
-ON cl.id = cc.color_id AND cr.id = cc.car_id
-LEFT JOIN car_shop.clients cli
-ON raw.phone = cli.phone
+LEFT JOIN car_shop.brands b
+ON split_part(raw.auto, ' ', 1) = b.name
+LEFT JOIN car_shop.models m
+ON ltrim(REPLACE(split_part(raw.auto, ', ', 1), split_part(raw.auto, ' ', 1), '')) = m.name
+LEFT JOIN car_shop.colors c
+ON split_part(raw.auto, ', ', 2) = c.name
+LEFT JOIN car_shop.clients cl
+ON raw.phone = cl.phone
+LEFT JOIN car_shop.brand_origin bo
+ON raw.brand_origin = bo.name
 ORDER BY raw.id;
 
 --/* проверка отдельных строк таблиц на схожесть с возможностью менять номера строк в where*/
 
+SELECT * FROM raw_data.sales;
+
 SELECT
 	i.id,
-	c.model,
-	c.gasoline_consumption::varchar,
+	b.name || ' ' || m.name || ' ' || c.name,
+	m.gasoline_consumption,
 	i.price,
 	i.billing_date,
-	cli.last_name,
+	cli.first_name || ' ' || cli.last_name,
 	cli.phone,
 	i.discount,
-	c.brand_origin
+	bo.name
 FROM car_shop.invoices i
-LEFT JOIN car_shop.cars c
-ON i.car_id = c.id
+LEFT JOIN car_shop.brands b
+ON i.brand_id = b.id
+LEFT JOIN car_shop.models m
+ON i.model_id = m.id
+LEFT JOIN car_shop.colors c
+ON i.color_id = c.id
 LEFT JOIN car_shop.clients cli
 ON i.customer_id = cli.id
+LEFT JOIN car_shop.brand_origin bo
+ON i.country_id = bo.id
 WHERE i.id = 234
 UNION
 SELECT *
@@ -189,25 +202,25 @@ WHERE id = 234;
 ---- Задание 1. Напишите запрос, который выведет процент моделей машин, у которых нет параметра `gasoline_consumption`.
 
 SELECT
-	100 - count(c.gasoline_consumption) / count(i.id)::NUMERIC * 100 AS nulls_percentage_gasoline_consumption
+	100 - count(m.gasoline_consumption) / count(i.id)::NUMERIC * 100 AS nulls_percentage_gasoline_consumption
 FROM car_shop.invoices i
-LEFT JOIN car_shop.cars c
-ON i.car_id = c.id;
+LEFT JOIN car_shop.models m
+ON i.model_id = m.id;
 
 ---- Задание 2. Напишите запрос, который покажет название бренда и среднюю цену его автомобилей в разбивке по всем годам с учётом скидки.
 
 SELECT 
-	c.brand AS brand_name,
+	b.name AS brand_name,
 	EXTRACT(YEAR FROM i.billing_date) AS year,
 	avg(i.price)::numeric(9,2) AS price_avg
 FROM car_shop.invoices i 
-LEFT JOIN car_shop.cars c
-ON i.car_id = c.id
+LEFT JOIN car_shop.brands b
+ON i.brand_id = b.id
 GROUP BY
 	brand_name,
 	year
 ORDER BY
-	c.brand;
+	b.name;
 
 ---- Задание 3. Посчитайте среднюю цену всех автомобилей с разбивкой по месяцам в 2022 году с учётом скидки.
 
@@ -225,10 +238,12 @@ GROUP BY
 
 SELECT
 	cl.first_name || ' ' || cl.last_name AS person,
-	string_agg(cr.brand || ' ' || cr.model, ', ') AS cars
+	string_agg(b.name || ' ' || m.name, ', ') AS cars
 FROM car_shop.invoices i
-LEFT JOIN car_shop.cars cr
-ON i.car_id = cr.id
+LEFT JOIN car_shop.brands b
+ON i.brand_id = b.id
+LEFT JOIN car_shop.models m
+ON i.model_id = m.id
 LEFT JOIN car_shop.clients cl
 ON i.customer_id = cl.id
 GROUP BY cl.first_name || ' ' || cl.last_name
@@ -237,13 +252,13 @@ ORDER BY person;
 ---- Задание 5. Напишите запрос, который вернёт самую большую и самую маленькую цену продажи автомобиля с разбивкой по стране без учёта скидки.
 
 SELECT
-	c.brand_origin AS brand_origin,
+	b.name AS brand_origin,
 	max(i.price / (1 - i.discount / 100)) AS price_max,
 	min(i.price / (1 - i.discount / 100)) AS price_min
 FROM car_shop.invoices i
-LEFT JOIN car_shop.cars c
-ON i.car_id = c.id
-GROUP BY c.brand_origin;
+LEFT JOIN car_shop.brands b
+ON i.brand_id = b.id
+GROUP BY b.name;
 
 ---- Задание 6. Напишите запрос, который покажет количество всех пользователей из США.
 
